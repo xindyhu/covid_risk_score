@@ -5,21 +5,24 @@ source("src/helper_county.R")
 # Global variables can go here
 fips <- ''
 zip <- "94587"
-nppl <- 20
+nppl_hi <- 20
+nppl_lo <- 5
 
-css <- HTML(".html-widget.gauge svg {height: 350px;width: 900px;}")
+#css <- HTML(".html-widget.gauge_hi svg {height: 350px; width: 400px}
+#            .html-widget.gauge_lo svg {height: 350px; width: 400px}")
 
 # Define the UI
 ui <- fluidPage(theme=shinytheme("superhero"),
   titlePanel("COVID-19 Risk Score Calculator"),
-  tags$head(tags$style(css)),
+  #tags$head(tags$style(css)),
   #INPUT
   sidebarLayout(
     sidebarPanel(
       helpText("Answer a few questions to see your COVID-19 risk score:", class = "lead"),
       textInput('fips', label =  '5-digit FIPS code of your county', fips),
       textInput('zip', label =  "If you don't know your county FIPS code, what's your 5-digit zip code?", zip),
-      numericInput('nppl', 'Number of contacts you have had in the past two weeks', nppl),
+      numericInput('nppl_hi', 'Max number of contacts you have had in the past two weeks', nppl_hi),
+      numericInput('nppl_lo', 'Min number of contacts you have had in the past two weeks', nppl_lo),
       #sliderInput('fac_underreport', "Choose what percentage of cases are tested?", min = 0.01, max = 1, value = 0.15, step = 0.01),
       checkboxInput('is_sick', "Are you sick already?"),
       #checkboxInput('in_hosp', "Do you work in a hospital?"),
@@ -31,7 +34,9 @@ ui <- fluidPage(theme=shinytheme("superhero"),
     mainPanel(
       tabsetPanel(
         tabPanel("Plot",
-                 fluidRow(withSpinner(gaugeOutput("gauge"), type = 1), style = "height:350px;"),
+                 fluidRow(
+                   column(width=6, withSpinner(gaugeOutput("gauge_hi", width = "40%"), type = 1)),
+                   column(width=6, gaugeOutput("gauge_lo", width = "40%"))),
                  fluidRow(textOutput("res"), style = "width:800px")),
         #tabPanel("Map"),
         tabPanel("Methodology",
@@ -48,7 +53,8 @@ server <- function(input, output) {
     #validate input types
     validate(
       need(input$fips!="" | input$zip!="", 'Provide at least one of the two: FIPS and zip code.'),
-      need(input$nppl, 'Please provide the number of contacts.')
+      need(input$nppl_hi & input$nppl_lo, 'Please provide the number of contacts.'),
+      need(input$nppl_hi >0, 'The max number of people should be >0.')
     )
     #read in FIPS or get it from ZIP
     if(input$fips!=""){
@@ -61,36 +67,51 @@ server <- function(input, output) {
     county_name <- get_county_name(fips)
     county_casecount <- get_county_casecount(fips, latest_day)
     county_underreport <- calc_county_underreport(fips)
-    if (input$nppl>0){
-      risk <- 1-(1-get_county_casecount(fips, latest_day)/get_county_pop(fips)/calc_county_underreport(fips))^input$nppl
+    
+    risk_hi <- 1-(1-get_county_casecount(fips, latest_day)/get_county_pop(fips)/calc_county_underreport(fips))^input$nppl_hi
+    if (input$nppl_lo>0){
+      risk_lo <- 1-(1-get_county_casecount(fips, latest_day)/get_county_pop(fips)/calc_county_underreport(fips))^input$nppl_lo
     } else{
-      risk <- 0
+      risk_lo <- 0
     }
     g<-function(x){
       # a mapping function to address nonlinearity between probability and score
       assertthat::assert_that(x>=0 && x<=1)
       return((log(x)+8)/8)
     }
-    score<-if_else(risk>0, g(risk)*100, 0)
+    score_hi<-if_else(risk_hi>0, g(risk_hi)*100, 0)
+    score_lo<-if_else(risk_lo>0, g(risk_lo)*100, 0)
     
     unlist(list("fips" = fips,
                 "county_pop" = county_pop,
                 "county_name" = county_name,
                 "county_casecount" = county_casecount,
                 "county_underreport" = county_underreport,
-                "risk"= risk,
-                "score" = score
+                "risk_hi"= risk_hi,
+                "risk_lo" = risk_lo,
+                "score_hi" = score_hi,
+                "score_lo" = score_lo
     ))
   })
-  output$gauge <-renderGauge({
+  output$gauge_hi <-renderGauge({
     temp <- temp()
-    score <- round(as.numeric(temp['score']))
-    gauge(score, 
+    score_hi <- round(as.numeric(temp['score_hi']))
+    gauge(score_hi, 
           min = 0, max = 100, 
           sectors = gaugeSectors(success = c(0, 30),
                                  warning = c(30, 70),
                                  danger = c(70, 100)),
-          label = "")
+          label = "Upper bound")
+  })
+  output$gauge_lo <-renderGauge({
+    temp <- temp()
+    score_lo <- round(as.numeric(temp['score_lo']))
+    gauge(score_lo, 
+          min = 0, max = 100, 
+          sectors = gaugeSectors(success = c(0, 30),
+                                 warning = c(30, 70),
+                                 danger = c(70, 100)),
+          label = "Lower bound")
   })
   output$res <-renderText({
     temp <- temp()
@@ -98,8 +119,10 @@ server <- function(input, output) {
           'Your county has', temp['county_casecount'], 'cases out of a population of', 
           format(temp['county_pop']%>%as.numeric(), big.mark = ','), '.',
           'We estimated the under-reporting factor is', scales::percent(temp['county_underreport']%>%as.numeric()), '.',
-          "The probability of you contracting COVID-19 is", scales::percent(temp['risk']%>%as.numeric()), '.',
-          "On a scale of 0 to 100, your risk score is", round(temp['score']%>%as.numeric()), '.')
+          "The probability of you contracting COVID-19 ranges", 
+          scales::percent(temp['risk_lo']%>%as.numeric()), 'to', scales::percent(temp['risk_hi']%>%as.numeric()), '.',
+          "On a scale of 0 to 100, your risk score ranges", 
+          round(temp['score_lo']%>%as.numeric()), 'to', round(temp['score_hi']%>%as.numeric()), ".")
   })
   output$methods <-renderText({
     "Methodology placeholder (George)."
